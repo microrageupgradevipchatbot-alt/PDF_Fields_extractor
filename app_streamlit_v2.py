@@ -14,13 +14,10 @@ from app_v2 import extract_fields_ai
 st.set_page_config(page_title="Service PDF Extractor (Vision)", layout="centered")
 
 st.markdown("""
-# 📄 Service PDF Extractor — Gemini Vision V2
-Upload one or more **service PDFs** . The Vision model will read the PDF (including images/tables)
-and return a strict JSON with the service schema.
+# 📄 Service PDF Extractor — Gemini Vision V2.5
 """)
 
 # small old-style UI wrapper (like your screenshot)
-st.write("Upload PDF(s) — the model will extract these keys: service_type, services, title, airport, pricing (1-10 pax), ...")
 
 uploaded_file = st.file_uploader("Upload PDF", type=["pdf"], accept_multiple_files=False)
 
@@ -75,21 +72,54 @@ if uploaded_file:
     st.write(f"**File:** {uploaded_file.name}")
 
     # Use session_state to cache result for this file
+    # NEW CODE:
     file_key = f"result_{uploaded_file.name}_{uploaded_file.size}"
     if file_key not in st.session_state:
-        with st.spinner(f"Processing {uploaded_file.name} with Gemini Vision..."):
-            try:
-                result = extract_fields_ai(uploaded_file)
-            except Exception as e:
-                st.error(f"Processing error: {e}")
-                result = None
-            st.session_state[file_key] = result
+        # Create a larger, persistent processing indicator
+        processing_container = st.empty()
+        # NEW CODE - Dots Right After PDF (No Space):
+        with processing_container:
+            st.markdown("""
+            <style>
+            @keyframes dots {
+                0%, 20% { content: ''; }
+                40% { content: '.'; }
+                60% { content: '..'; }
+                80%, 100% { content: '...'; }
+            }
+            .loading-title::after {
+                content: '';
+                animation: dots 1.5s infinite;
+            }
+            </style>
+            <div style='padding: 40px; text-align: center; background: #f8f9fa; 
+                        border: 2px solid #e9ecef; border-radius: 10px; margin: 20px 0;'>
+                <h2 style='color: #2c3e50; margin: 0; font-weight: 600;'>
+                    <span class='loading-title'>🔄 Processing Your PDF</span>
+                </h2>
+                <p style='color: #6c757d; margin: 15px 0 0 0; font-size: 20px;font-weight:bold;'>
+                    Extracting service details with AI. Please wait...
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+        try:
+            result = extract_fields_ai(uploaded_file)
+            processing_container.empty()  # Clear only after success
+        except Exception as e:
+            processing_container.empty()
+            st.error(f"Processing error: {e}")
+            result = None
+        
+        st.session_state[file_key] = result
     else:
         result = st.session_state[file_key]
 
     if isinstance(result, dict) and result.get("error"):
-        st.error("Extraction error — see raw output below.")
-        st.write(result.get("detail") or result.get("raw"))
+        if result.get("error") == "quota_exceeded":
+            st.error("⚠️ " + result.get("detail"))
+        else:
+            st.error("❌ Extraction error — see details below.")
+            st.write(result.get("detail") or result.get("raw"))
     elif result:
         st.subheader("Extracted JSON")
         st.json(result)

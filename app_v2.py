@@ -23,10 +23,10 @@ def get_model():
 
 # Template for single service
 SERVICE_TEMPLATE = {
-    "service_name": "", # "airport vip" or "transfer".
-    "service category": "", 
-    "title": "", #title of the pdf document only.
-    "airport": "", # airport name.
+    "service Category": "", # "airport vip" or "transfer".
+    "service name": "",# full name of that service 
+    "Company_title": "", #  brand/company near the logo.
+    "airport": "", #  # FULL airport name exactly as printed (e.g., "London Heathrow Airport(LHR)"). Never just IATA codes like LHR/JFK.
     "pricing": {
         "1_pax": {"adults": None, "children": None},
         "2_pax": {"adults": None, "children": None},
@@ -39,6 +39,8 @@ SERVICE_TEMPLATE = {
         "9_pax": {"adults": None, "children": None},
         "10_pax": {"adults": None, "children": None}
     },
+    "VAT": "", # VAT rate or details if present.
+    "cancellation_policy": "", # Cancellation policy details if present.
     "travel_type": "",# "arrival" or "departure" or "both".
     "meeting_point": "",
     "fast_track": "no", # "yes" or "no" or "Expedited" .
@@ -76,15 +78,26 @@ PRICING RULES - VERY IMPORTANT:
 5. If child price is not mentioned Explicitly then, set it to null.
 6. If price is written but not clear whom it applies whether child or adult then you must put it under 'service_details' also show the VAT if mentioned for that price.
 
-SERVICE IDENTIFICATION:
-- service_name: Extract the exact service name ( "vip" or "Transfer (Transit)").
+service Category IDENTIFICATION:
+- service Category: Extract the exact service name ( "vip" or "Transfer (Transit)").
+- You must to put only "vip" or "transfer" in service_name field.
+
+-> Airport VIP: Fast-track, meet & greet, lounge access, porter, concierge assistance at airports.
+-> Airport Transfers: Private chauffeur service to/from airports with luxury vehicles.
+
 - If PDF have both vip amd transfer than return multiple objects in the array
-NOTE: service_name should be either vip or tranfser other services like chauffer, car parking etc details should go in 'service_details' field where description also go.
+NOTE: service Category should be either vip or tranfser. ALL the other services like chauffer, car parking etc details must go in 'service_details' field where description also goes.
+
 
 travel_type IDENTIFICATION:
 - if only arrival is mentioned then travel_type is "arrival"
 - if only departure is mentioned then travel_type is "departure"
 - if both arrival and departure mentioned then travel_type is "both"
+
+Company_title IDENTIFICATION:
+- Company_title must be the brand/company printed near the logo/header.
+- If both brand and a generic header appear, return ONLY the brand.
+
 
 
 OUTPUT FORMAT:
@@ -135,9 +148,12 @@ def extract_fields_ai(pdf_file):
                 #"max_output_tokens": 8192,
             }
         )
+    # NEW CODE:
     except Exception as e:
-        return {"error": "model_call_failed", "detail": str(e)}
-
+        error_msg = str(e)
+        if "429" in error_msg or "quota" in error_msg.lower() or "exceeded" in error_msg.lower():
+            return {"error": "quota_exceeded", "detail": "Quota is over for the API key"}
+        return {"error": "model_call_failed", "detail": error_msg}
     # Extract response text
     print("Raw response:", response)
     cleaned = response.text.strip()
