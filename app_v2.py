@@ -6,14 +6,13 @@ Environment: GOOGLE_API_KEY in .env
 
 import os
 import json
-from dotenv import load_dotenv
 import google.generativeai as genai
+import streamlit as st
 
-load_dotenv()
-api_key = os.getenv("GOOGLE_API")
+api_key = st.secrets["API_KEY"]
 if not api_key:
-    raise RuntimeError("Please set GOOGLE_API_KEY in your environment (or .env).")
-
+    raise RuntimeError("Please set API_KEY in Streamlit secrets.")
+    
 genai.configure(api_key=api_key)
 MODEL_NAME = "gemini-2.5-flash"
 print("Using Gemini model:", MODEL_NAME)
