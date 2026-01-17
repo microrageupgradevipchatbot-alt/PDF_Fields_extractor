@@ -6,7 +6,7 @@ Environment: GOOGLE_API_KEY in .env
 
 import os
 import json
-import google.genai as genai
+import google.generativeai as genai
 import streamlit as st
 
 api_key = st.secrets["API_KEY"]
