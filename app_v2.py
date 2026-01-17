@@ -45,7 +45,8 @@ SERVICE_TEMPLATE = {
     "fast_track": "no", # "yes" or "no" or "Expedited" .
     "service_details": [], # details of the service in bullet points.
     "transportation_inside_airport": "Foot", # "Foot" or "Vehicle". if not mentioned then put by default "Foot".
-    "assistance_with_pieces_of_luggage": "", 
+    "no.of_bags_assistance": "",# store free number of bags numeric value here only.
+    "assistance_with_your_luggage": "", 
     "lounge_access": "no", # "yes" or "no". if not mentioned then put by default "no".
     "duration_minutes": "", # if written in hours so convert them in minutes.
     "fee_ooh": "", # Out of hours fee, mention time and price both if written.
@@ -85,7 +86,7 @@ service Category IDENTIFICATION:
 -> Airport Transfers: Private chauffeur service to/from airports with luxury vehicles.
 
 - If PDF have both vip amd transfer than return multiple objects in the array
-NOTE: service Category should be either vip or tranfser. ALL the other services like chauffer, car parking etc details must go in 'service_details' field where description also goes.
+NOTE: service Category should be either vip or transfer. ALL the other services like chauffer, car parking etc details must go in 'service_details' field where description also goes.
 
 
 travel_type IDENTIFICATION:
@@ -110,7 +111,7 @@ Example for PDF with more than 1 services:
 ] 
 
 Important: 
-- You are strcitly prohibited to invent any data not present in the PDF.
+- You are strictly prohibited to invent any data not present in the PDF.
 - Do not invent any data by yourself .
 
 
