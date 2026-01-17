@@ -45,8 +45,8 @@ SERVICE_TEMPLATE = {
     "fast_track": "no", # "yes" or "no" or "Expedited" .
     "service_details": [], # details of the service in bullet points.
     "transportation_inside_airport": "Foot", # "Foot" or "Vehicle". if not mentioned then put by default "Foot".
-    "no.of_bags_assistance": "",# store free number of bags numeric/integer value against this field only. i.e 2 or 3 etc
-    "assistance_with_your_luggage": "", # store complete description of number of bags service against this field. i.e  Two checked pieces per person Free of charge. Each additional piece of checked luggage VAT 23%. Price €10.00.
+    "no.of_bags_assistance": "", # store ONLY the NUMBER of free checked bags/pieces per person (e.g., 2). DO NOT include text or units.
+    "assistance_with_your_luggage": "", # store the FULL description of the luggage/baggage service, including free allowance and extra charges, VAT, and price if mentioned.
     "lounge_access": "no", # "yes" or "no". if not mentioned then put by default "no".
     "duration_minutes": "", # if written in hours so convert them in minutes.
     "fee_ooh": "", # Out of hours fee, mention time and price both if written.
@@ -98,6 +98,9 @@ Company_title IDENTIFICATION:
 - Company_title must be the brand/company printed near the logo/header.
 - If both brand and a generic header appear, return ONLY the brand.
 
+BAGGAGE FIELDS EXTRACTION RULES:
+- "no.of_bags_assistance": Extract ONLY the NUMBER of free checked bags/pieces per person (e.g., 2). DO NOT include any text, units, or descriptions.
+- "assistance_with_your_luggage": Extract the FULL description of the luggage/baggage service, including the free allowance, extra charges, VAT, and price if mentioned. Example: "Two checked pieces per person Free of charge. Each additional piece of checked luggage 23% VAT and price €10.00."
 
 
 OUTPUT FORMAT:
