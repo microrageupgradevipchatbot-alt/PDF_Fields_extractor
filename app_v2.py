@@ -45,8 +45,9 @@ SERVICE_TEMPLATE = {
     "fast_track": "no", # "yes" or "no" or "Expedited" .
     "service_details": [], # details of the service in bullet points.
     "transportation_inside_airport": "Foot", # "Foot" or "Vehicle". if not mentioned then put by default "Foot".
-    "no.of_bags_assistance": "",# store free number of bags numeric value here only.
-    "assistance_with_your_luggage": "", 
+    "no.of_bags_assistance": "",# store free number of bags numeric/integer value against this field only. i.e 2 or 3 etc
+    "assistance_with_your_luggage": "", # store complete description of number of bags service against this field. i.e  Two checked pieces per person Free of charge
+each additional piece of checked luggage VAT 23%. Price €10.00.
     "lounge_access": "no", # "yes" or "no". if not mentioned then put by default "no".
     "duration_minutes": "", # if written in hours so convert them in minutes.
     "fee_ooh": "", # Out of hours fee, mention time and price both if written.
