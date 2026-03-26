@@ -22,10 +22,10 @@ def get_model():
 
 # Template for single service
 SERVICE_TEMPLATE = {
-    "service Category": "", # "airport vip" or "transfer".
-    "service name": "",# full name of that service 
-    "Company_title": "", #  brand/company near the logo.
-    "airport": "", #  # FULL airport name exactly as printed (e.g., "London Heathrow Airport(LHR)"). Never just IATA codes like LHR/JFK.
+    "service_name": "", # "airport vip" or "transfer".
+    "service category": "", 
+    "title": "", #title of the pdf document only.
+    "airport": "", # airport name.
     "pricing": {
         "1_pax": {"adults": None, "children": None},
         "2_pax": {"adults": None, "children": None},
@@ -38,19 +38,20 @@ SERVICE_TEMPLATE = {
         "9_pax": {"adults": None, "children": None},
         "10_pax": {"adults": None, "children": None}
     },
-    "VAT": "", # VAT rate or details if present.
-    "cancellation_policy": "", # Cancellation policy details if present.
     "travel_type": "",# "arrival" or "departure" or "both".
     "meeting_point": "",
     "fast_track": "no", # "yes" or "no" or "Expedited" .
     "service_details": [], # details of the service in bullet points.
     "transportation_inside_airport": "Foot", # "Foot" or "Vehicle". if not mentioned then put by default "Foot".
-    "no.of_bags_assistance": "", # store ONLY the NUMBER of free checked bags/pieces per person (e.g., 2). DO NOT include text or units.
-    "assistance_with_your_luggage": "", # store the FULL description of the luggage/baggage service, including free allowance and extra charges, VAT, and price if mentioned.
+    "assistance_with_pieces_of_luggage": "", 
     "lounge_access": "no", # "yes" or "no". if not mentioned then put by default "no".
+    "farewell": "no",      # "yes" or "no"
     "duration_minutes": "", # if written in hours so convert them in minutes.
+    "per_additional_hour_fee": "",     # fee + currency for each extra hour
     "fee_ooh": "", # Out of hours fee, mention time and price both if written.
     "late_booking_fee": "",
+    "cancellation_policy": "",         # full cancellation tiers, e.g. "Free cancellation up to 24h, 50% charge within 12h" etc
+    "vat_percentage": "",              # e.g. "10%", "20% included" etc
     "usp": "",
     "100% refund_policy_hours": ""
 }
@@ -66,7 +67,7 @@ IMPORTANT: Return a JSON ARRAY with one object for each service found.
 Each service object must follow this template:
 {template_json}
 
-PRICING RULES - VERY IMPORTANT:
+**PRICING RULES - VERY IMPORTANT:**
 1. Extract BOTH adult AND child prices separately for EACH service
 2. Look for phrases like "Price per child" or "Children (2-16yrs old)" 
 3. Calculate multi-passenger pricing:
@@ -78,32 +79,23 @@ PRICING RULES - VERY IMPORTANT:
 5. If child price is not mentioned Explicitly then, set it to null.
 6. If price is written but not clear whom it applies whether child or adult then you must put it under 'service_details' also show the VAT if mentioned for that price.
 
-service Category IDENTIFICATION:
-- service Category: Extract the exact service name ( "vip" or "Transfer (Transit)").
-- You must to put only "vip" or "transfer" in service_name field.
-
--> Airport VIP: Fast-track, meet & greet, lounge access, porter, concierge assistance at airports.
--> Airport Transfers: Private chauffeur service to/from airports with luxury vehicles.
-
+**SERVICE IDENTIFICATION:**
+- service_name: Extract the exact service name ( "vip" or "Transfer (Transit)").
 - If PDF have both vip amd transfer than return multiple objects in the array
-NOTE: service Category should be either vip or transfer. ALL the other services like chauffer, car parking etc details must go in 'service_details' field where description also goes.
+NOTE: service_name should be either vip or tranfser other services like chauffer, car parking etc details should go in 'service_details' field where description also go.
 
-
-travel_type IDENTIFICATION:
+**travel_type IDENTIFICATION:**
 - if only arrival is mentioned then travel_type is "arrival"
 - if only departure is mentioned then travel_type is "departure"
 - if both arrival and departure mentioned then travel_type is "both"
 
-Company_title IDENTIFICATION:
-- Company_title must be the brand/company printed near the logo/header.
-- If both brand and a generic header appear, return ONLY the brand.
+farewell: "yes" if service mentions farewell/send-off, else "no".
+cancellation_policy: Extract full policy with all tiers/windows. If absent, null.
+100% refund_policy_hours: Extract only the full-refund window in hours.
+vat_percentage: Extract exact VAT % stated (e.g. "10%", "20% included"). If absent, null. Do NOT invent.
+per_additional_hour_fee: Extract fee per extra hour with currency (e.g. "€50"). If absent, null.
 
-BAGGAGE FIELDS EXTRACTION RULES:
-- "no.of_bags_assistance": Extract ONLY the NUMBER of free checked bags/pieces per person (e.g., 2). DO NOT include any text, units, or descriptions.
-- "assistance_with_your_luggage": Extract the FULL description of the luggage/baggage service, including the free allowance, extra charges, VAT, and price if mentioned. Example: "Two checked pieces per person Free of charge. Each additional piece of checked luggage 23% VAT and price €10.00."
-
-
-OUTPUT FORMAT:
+**OUTPUT FORMAT:**
 Return ONLY valid JSON array. No markdown, no backticks, no explanations.
 
 Example for PDF with more than 1 services:
@@ -113,10 +105,10 @@ Example for PDF with more than 1 services:
   
 ] 
 
-Important: 
-- You are strictly prohibited to invent any data not present in the PDF.
-- Do not invent any data by yourself .
-
+**Important:**
+- Every service object MUST contain ALL fields from the template. No field may be omitted.
+- For every field, actively search the PDF before setting null.
+- You are strictly prohibited from inventing any data not present in the PDF.
 
 
 Now extract ALL services from the PDF.
@@ -174,3 +166,28 @@ def extract_fields_ai(pdf_file):
         return parsed
     except json.JSONDecodeError as e:
         return {"error": "invalid_json", "raw": cleaned, "detail": str(e)}
+
+def flag_missing_fields(service_list):
+    """
+    Returns a list of dicts, each with missing/incomplete fields for a service.
+    """
+    missing_info = []
+    for idx, service in enumerate(service_list):
+        missing_fields = []
+        for key, value in service.items():
+            if isinstance(value, dict):
+                for subkey, subval in value.items():
+                    if isinstance(subval, dict):
+                        for subsubkey, subsubval in subval.items():
+                            if subsubval in [None, "", [], {}]:
+                                missing_fields.append(f"{key}.{subkey}.{subsubkey}")
+                    elif subval in [None, "", [], {}]:
+                        missing_fields.append(f"{key}.{subkey}")
+            elif value in [None, "", [], {}]:
+                missing_fields.append(key)
+        missing_info.append({
+            "service_index": idx,
+            "service_name": service.get("service_name", f"Service {idx+1}"),
+            "missing_fields": missing_fields
+        })
+    return missing_info
