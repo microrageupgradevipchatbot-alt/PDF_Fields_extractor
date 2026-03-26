@@ -9,15 +9,17 @@ import streamlit as st
 import io
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
-from app_v2 import extract_fields_ai
+import time
+from concurrent.futures import ThreadPoolExecutor
+from app_v2 import extract_fields_ai, flag_missing_fields
+
 
 st.set_page_config(page_title="Service PDF Extractor (Vision)", layout="centered")
 
 st.markdown("""
-# 📄 Service PDF Extractor — Gemini Vision V2.5
+# 📄 Service PDF Extractor — Gemini Vision V2
 """)
 
-# small old-style UI wrapper (like your screenshot)
 
 uploaded_file = st.file_uploader("Upload PDF", type=["pdf"], accept_multiple_files=False)
 
@@ -72,57 +74,62 @@ if uploaded_file:
     st.write(f"**File:** {uploaded_file.name}")
 
     # Use session_state to cache result for this file
-    # NEW CODE:
     file_key = f"result_{uploaded_file.name}_{uploaded_file.size}"
     if file_key not in st.session_state:
-        # Create a larger, persistent processing indicator
-        processing_container = st.empty()
-        # NEW CODE - Dots Right After PDF (No Space):
-        with processing_container:
-            st.markdown("""
-            <style>
-            @keyframes dots {
-                0%, 20% { content: ''; }
-                40% { content: '.'; }
-                60% { content: '..'; }
-                80%, 100% { content: '...'; }
-            }
-            .loading-title::after {
-                content: '';
-                animation: dots 1.5s infinite;
-            }
-            </style>
-            <div style='padding: 40px; text-align: center; background: #f8f9fa; 
-                        border: 2px solid #e9ecef; border-radius: 10px; margin: 20px 0;'>
-                <h2 style='color: #2c3e50; margin: 0; font-weight: 600;'>
-                    <span class='loading-title'>🔄 Processing Your PDF</span>
-                </h2>
-                <p style='color: #6c757d; margin: 15px 0 0 0; font-size: 20px;font-weight:bold;'>
-                    Extracting service details with AI. Please wait...
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-        try:
-            result = extract_fields_ai(uploaded_file)
-            processing_container.empty()  # Clear only after success
-        except Exception as e:
-            processing_container.empty()
-            st.error(f"Processing error: {e}")
-            result = None
-        
+        status_box = st.empty()
+        progress_box = st.empty()
+        hint_box = st.empty()
+
+        start_time = time.time()
+        estimated_max = 45
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(extract_fields_ai, uploaded_file)
+
+            while not future.done():
+                elapsed = time.time() - start_time
+                pct = min(int((elapsed / estimated_max) * 100), 95)
+
+                status_box.info("Processing PDF... this usually takes 25 to 45 seconds.")
+                progress_box.progress(pct, text=f"Processing: {pct}% | Elapsed: {int(elapsed)}s")
+
+                if elapsed < 7:
+                    hint_box.caption("Step 1/3: Reading PDF content...")
+                elif elapsed < 20:
+                    hint_box.caption("Step 2/3: Extracting services and pricing...")
+                else:
+                    hint_box.caption("Step 3/3: Validating fields and preparing output...")
+
+                time.sleep(0.25)
+
+            try:
+                result = future.result()
+            except Exception as e:
+                st.error(f"Processing error: {e}")
+                result = None
+
+        total_time = time.time() - start_time
+        status_box.success(f"Done in {total_time:.1f}s")
+        progress_box.progress(100, text="Completed: 100%")
+        hint_box.caption("Extraction finished successfully.")
         st.session_state[file_key] = result
     else:
         result = st.session_state[file_key]
+        
 
     if isinstance(result, dict) and result.get("error"):
-        if result.get("error") == "quota_exceeded":
-            st.error("⚠️ " + result.get("detail"))
-        else:
-            st.error("❌ Extraction error — see details below.")
-            st.write(result.get("detail") or result.get("raw"))
+        st.error("Extraction error — see raw output below.")
+        st.write(result.get("detail") or result.get("raw"))
     elif result:
         st.subheader("Extracted JSON")
         st.json(result)
+
+        # Show missing/incomplete fields
+        if isinstance(result, list):
+            missing = flag_missing_fields(result)
+            st.subheader("Missing or Incomplete Fields")
+            for service in missing:
+                st.write(f"**{service['service_name']}**: {', '.join(service['missing_fields']) or 'None'}")
 
     # --- Download buttons at the bottom ---
     st.markdown("---")
