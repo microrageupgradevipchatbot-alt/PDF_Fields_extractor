@@ -21,12 +21,13 @@
 
 import os
 import json
-from dotenv import load_dotenv
+# from dotenv import load_dotenv
 import google.generativeai as genai
-
+import streamlit as st
 # ── ENV & MODEL ───────────────────────────────────────────────────────────────
-load_dotenv()
-api_key = os.getenv("GOOGLE_API")
+# load_dotenv()
+# api_key = os.getenv("GOOGLE_API")
+api_key = st.secrets["GOOGLE_API"]
 if not api_key:
     raise RuntimeError("Please set GOOGLE_API in your environment (.env).")
 
