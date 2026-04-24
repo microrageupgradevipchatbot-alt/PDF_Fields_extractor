@@ -1,53 +1,54 @@
-# app_v2.py — PDF Extractor Backend (v3)
+# app_v2.py — PDF Extractor Backend (v4)
 # ─────────────────────────────────────────────────────────────────────────────
-# CHANGES vs previous version:
-#   FIX 1 → Services that cover both arrival AND departure are now split into
-#            TWO separate objects (one per direction). travel_type="both" is
-#            banned — Gemini is explicitly told never to use it.
-#
-#   FIX 2 → extract_fields_ai() still accepts ONE pdf file at a time.
-#            The Streamlit frontend calls it once per uploaded PDF in parallel
-#            (ThreadPoolExecutor). Results are returned as a list of
-#            (filename, result) tuples so the UI can show a header per file.
-#
-#   FIX 3 → fast_track is now a structured dict instead of a plain string:
-#            {
-#              "departure": { "security": <value> },
-#              "arrival":   { "immigration": <value>, "customs": <value> }
-#            }
-#            Allowed values: "fast track" | "expedited" | "assistance" |
-#                            "no assistance" | null
+# CHANGES vs v3:
+#   • Removed per-model retry loop — replaced with model fallback chain
+#   • FALLBACK_MODELS: 2.5-flash → 2.5-pro → 3.1-flash-image-preview → 2.0-flash
+#   • Each model gets ONE clean attempt; failures move to next model
+#   • Retryable errors (503, 429, 500) trigger fallback; others abort immediately
 # ─────────────────────────────────────────────────────────────────────────────
 
 import os
 import json
+import time
+import random
 # from dotenv import load_dotenv
-import google.generativeai as genai
+from google import genai
+from google.genai import types
+
 import streamlit as st
-# ── ENV & MODEL ───────────────────────────────────────────────────────────────
+# ── ENV ───────────────────────────────────────────────────────────────────────
 # load_dotenv()
 # api_key = os.getenv("GOOGLE_API")
 api_key = st.secrets["GOOGLE_API"]
 if not api_key:
     raise RuntimeError("Please set GOOGLE_API in your environment (.env).")
 
-genai.configure(api_key=api_key)
-MODEL_NAME = "gemini-2.5-flash"
-print(f"[Backend] Using model: {MODEL_NAME}")
+print("🔑 [Init] Loaded environment variables and API key.")
 
 
-def get_model():
-    return genai.GenerativeModel(MODEL_NAME)
+# ── MODEL FALLBACK CHAIN ──────────────────────────────────────────────────────
+FALLBACK_MODELS = [
+    "gemini-2.5-flash",                  # 🥇 Primary   — best speed + multimodal PDF
+    "gemini-3.1-flash-image-preview",    # 🥉 Fallback 2 — image-specialized, scanned PDFs
+    "gemini-2.5-pro",                    # 🥈 Fallback 1 — stronger reasoning, complex layouts
+    "gemini-2.0-flash",                  # 4️⃣ Fallback 3 — rock solid, almost never 503s
+]
+
+print(f"🔗 [Init] Model fallback chain loaded — {len(FALLBACK_MODELS)} models ready.")
+
+
+# ── CLIENT ────────────────────────────────────────────────────────────────────
+def get_client():
+    print("🤖 [Gemini] Creating Gemini client instance.")
+    return genai.Client(api_key=api_key)
 
 
 # ── SERVICE TEMPLATE ──────────────────────────────────────────────────────────
-# FIX 3: fast_track is now a nested dict, not a plain "yes/no" string.
-# FIX 1: travel_type is "arrival" | "departure" | "transfer" — never "both".
 SERVICE_TEMPLATE = {
-    "service_name": "",          # e.g. "VIP Arrival", "VIP Departure", "Transfer"
+    "service_name": "",
     "service_category": "",
-    "title": "",                 # Title of the PDF document
-    "airport": "",               # Airport name / code
+    "title": "",
+    "airport": "",
     "pricing": {
         "1_pax":  {"adults": None, "children": None},
         "2_pax":  {"adults": None, "children": None},
@@ -58,29 +59,24 @@ SERVICE_TEMPLATE = {
         "7_pax":  {"adults": None, "children": None},
         "8_pax":  {"adults": None, "children": None},
         "9_pax":  {"adults": None, "children": None},
-        "10_pax": {"adults": None, "children": None}
+        "10_pax": {"adults": None, "children": None},
     },
-    
-    "travel_type": "",
+    "travel_type": "",        # "arrival" | "departure" | "transfer" — never "both"
     "meeting_point": "",
-
-    
     "fast_track": {
         "departure": {
-            # Allowed: "fast track" | "expedited" | "assistance" | "no assistance" | null
-            "security": None
+            "security": None  # "fast track" | "expedited" | "assistance" | "no assistance" | null
         },
         "arrival": {
-            "immigration": None,   # same allowed values
-            "customs":     None    # same allowed values
+            "immigration": None,
+            "customs":     None,
         }
     },
-
     "service_details": [],
     "transportation_inside_airport": "Foot",   # "Foot" | "Vehicle"
     "assistance_with_pieces_of_luggage": "",
-    "lounge_access": "no",         # "yes" | "no"
-    "farewell": "no",              # "yes" | "no"
+    "lounge_access": "no",
+    "farewell": "no",
     "duration_minutes": "",
     "per_additional_hour_fee": "",
     "fee_ooh": "",
@@ -92,8 +88,9 @@ SERVICE_TEMPLATE = {
 }
 
 
-# ── PROMPT BUILDER ────────────────────────────────────────────────────────────
+# ── PROMPT ────────────────────────────────────────────────────────────────────
 def _make_prompt() -> str:
+    print("📝 [Prompt] Building extraction prompt.")
     template_json = json.dumps(SERVICE_TEMPLATE, indent=2)
 
     return f"""
@@ -107,10 +104,10 @@ Each object must follow this template exactly:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RULE 1 — ARRIVAL / DEPARTURE SPLIT  ⚠️ CRITICAL
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• travel_type must be EXACTLY one of: "arrival" | "departure" | "transfer"
-• The value "both" is STRICTLY FORBIDDEN. Never use it.
+- travel_type must be EXACTLY one of: "arrival" | "departure" | "transfer"
+- The value "both" is STRICTLY FORBIDDEN. Never use it.
 
-• If a service applies to BOTH arrival and departure:
+- If a service applies to BOTH arrival and departure:
     → Create TWO objects: one travel_type="arrival", one travel_type="departure"
     → Name them clearly: e.g. "VIP Arrival" and "VIP Departure"
     → If pricing is shared (e.g. "each way €475"): copy same pricing into both objects
@@ -118,7 +115,7 @@ RULE 1 — ARRIVAL / DEPARTURE SPLIT  ⚠️ CRITICAL
     → Fill meeting_point, farewell, fast_track, service_details
       with direction-specific info for each object
 
-• Transfer / Transit services → travel_type = "transfer"
+- Transfer / Transit services → travel_type = "transfer"
 
 Example — PDF says "Departure or Arrival €475 per person":
 [
@@ -133,49 +130,40 @@ fast_track is a NESTED OBJECT — not a string, not "yes/no".
 
   "fast_track": {{
     "departure": {{
-      "security": <value>          ← security lane / checkpoint at departure
+      "security": <value>
     }},
     "arrival": {{
-      "immigration": <value>,      ← passport control / immigration at arrival
-      "customs":     <value>       ← customs checkpoint at arrival
+      "immigration": <value>,
+      "customs":     <value>
     }}
   }}
 
-Allowed values for every sub-field (use EXACTLY one of these):
-  "fast track"    → supplier explicitly provides fast track / priority lane
-  "expedited"     → supplier uses "expedited" or similar accelerated wording
-  "assistance"    → agent assists the passenger through checkpoint (no dedicated lane)
-  "no assistance" → document explicitly states no assistance at this checkpoint
-  null            → not mentioned anywhere in this PDF
+Allowed values:
+  "fast track" | "expedited" | "assistance" | "no assistance" | null
 
 Direction rules:
-  • For an ARRIVAL object    → fill arrival.immigration + arrival.customs;
-                               set departure.security = null
-  • For a DEPARTURE object   → fill departure.security;
-                               set arrival.immigration = null, arrival.customs = null
-  • For a TRANSFER object    → fill all three if the PDF mentions them
+  • ARRIVAL object   → fill arrival.immigration + arrival.customs; departure.security = null
+  • DEPARTURE object → fill departure.security; arrival fields = null
+  • TRANSFER object  → fill all three if mentioned
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RULE 3 — PRICING
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• 1_pax adults  = price for the first / only person
-• 2_pax adults  = price for 1st person + 1 additional person (cumulative total)
-  … continue cumulatively for each pax tier
-• children: extract ONLY if explicitly stated; otherwise null
-• If child price is unclear or mixed with adult pricing, put it in service_details
+- 1_pax adults  = price for the first / only person
+- 2_pax adults  = cumulative total for 2 people
+  … continue cumulatively per tier
+- children: extract ONLY if explicitly stated; otherwise null
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RULE 4 — GENERAL
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• service_name: use "vip" or "transfer" as the base; chauffeur/parking/lounge
-  add-ons go into service_details, not as separate top-level services
-• Every object MUST contain ALL template fields — no field may be omitted
-• Do NOT invent data not present in this PDF
-• cancellation_policy: include full tiers if available
-• 100%_refund_policy_hours: extract only the full-refund window in hours
-• vat_percentage: extract exact % stated; if absent → null
-• per_additional_hour_fee: fee + currency (e.g. "€50"); if absent → null
-• duration_minutes: convert hours to minutes if needed
+- Every object MUST contain ALL template fields — no field may be omitted
+- Do NOT invent data not present in this PDF
+- cancellation_policy: include full tiers if available
+- 100%_refund_policy_hours: full-refund window in hours only
+- vat_percentage: exact % or null
+- per_additional_hour_fee: fee + currency (e.g. "€50") or null
+- duration_minutes: convert hours to minutes if needed
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT
@@ -186,77 +174,98 @@ Now extract ALL services from this PDF.
 """
 
 
-# ── MAIN EXTRACTION FUNCTION ──────────────────────────────────────────────────
-# FIX 2: Still accepts ONE pdf_file at a time.
-#         The frontend calls this function once per uploaded PDF,
-#         running them in parallel via ThreadPoolExecutor.
+# ── EXTRACTION — MODEL FALLBACK CHAIN ────────────────────────────────────────
 def extract_fields_ai(pdf_file) -> list | dict:
-    """
-    Extract service info from a single PDF file object.
+    filename = getattr(pdf_file, "name", "unknown")
+    print(f"\n📄 [Extract] Starting extraction for: {filename}")
 
-    Args:
-        pdf_file: A file-like object with .read() and optionally .type attribute.
-                  (Streamlit UploadedFile works directly.)
-
-    Returns:
-        list  → success: list of service dicts
-        dict  → failure: {"error": ..., "detail": ..., "raw": ...}
-    """
-    print(f"[extract_fields_ai] Processing: {getattr(pdf_file, 'name', 'unknown')}")
-
-    # Read raw bytes
     pdf_bytes = pdf_file.read()
     mime_type = getattr(pdf_file, "type", "application/pdf")
+    client    = get_client()
+    prompt    = _make_prompt()
 
-    model  = get_model()
-    prompt = _make_prompt()
+    # Retryable error signals — these trigger fallback to next model
+    RETRYABLE = ("503", "429", "500", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "INTERNAL")
 
-    # ── Call Gemini ───────────────────────────────────────────────────────────
-    try:
-        response = model.generate_content(
-            [
-                {
-                    "role": "user",
-                    "parts": [
-                        {"mime_type": mime_type, "data": pdf_bytes},
-                        {"text": prompt}
-                    ]
-                }
-            ],
-            generation_config={"temperature": 0.1}
-        )
-    except Exception as e:
-        print(f"[extract_fields_ai] Gemini call failed: {e}")
-        return {"error": "model_call_failed", "detail": str(e)}
+    for idx, model in enumerate(FALLBACK_MODELS):
+        position = f"{idx + 1}/{len(FALLBACK_MODELS)}"
+        print(f"\n🚀 [Gemini] Trying model {position}: {model}")
 
-    # ── Parse response ────────────────────────────────────────────────────────
-    raw = response.text.strip()
-    print(f"[extract_fields_ai] Raw response (first 300 chars): {raw[:300]}")
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part.from_bytes(data=pdf_bytes, mime_type=mime_type),
+                            types.Part.from_text(text=prompt),
+                        ]
+                    )
+                ],
+                config=types.GenerateContentConfig(temperature=0)
+            )
+            raw = response.text.strip()
 
-    # Strip markdown code fences if Gemini added them
-    cleaned = raw.replace("```json", "").replace("```", "").strip()
+            print(f"✅ [Gemini] Success with model: {model}")
 
-    try:
-        parsed = json.loads(cleaned)
-        # Normalise: always return a list
-        if isinstance(parsed, dict):
-            parsed = [parsed]
-        print(f"[extract_fields_ai] Parsed {len(parsed)} service(s).")
-        return parsed
+        except Exception as e:
+            err_str = str(e)
 
-    except json.JSONDecodeError as e:
-        print(f"[extract_fields_ai] JSON parse error: {e}")
-        return {"error": "invalid_json", "raw": cleaned, "detail": str(e)}
+            # Check if this error is worth falling back for
+            is_retryable = any(code in err_str for code in RETRYABLE)
+
+            if not is_retryable:
+                # Hard error (auth, bad request etc.) — no point trying other models
+                print(f"💀 [Gemini] Non-retryable error on {model} — aborting.")
+                print(f"   ↳ {err_str}")
+                return {"error": "model_call_failed", "detail": err_str}
+
+            # Soft error — try next model
+            if idx + 1 < len(FALLBACK_MODELS):
+                next_model = FALLBACK_MODELS[idx + 1]
+                delay = round(random.uniform(1, 3), 1)
+                print(f"⚠️  [Gemini] {model} failed — moving to next model.")
+                print(f"   ↳ Reason    : {err_str[:80]}")
+                print(f"   ↳ Next model: {next_model}")
+                print(f"   ↳ Waiting   : {delay}s...")
+                time.sleep(delay)
+            else:
+                print(f"🛑 [Gemini] All {len(FALLBACK_MODELS)} models failed — giving up.")
+                print(f"   ↳ Last error: {err_str}")
+                return {"error": "all_models_failed", "detail": err_str}
+
+            continue  # move to next model in loop
+
+        # ── PARSE ─────────────────────────────────────────────────────────────
+        print(f"🔍 [Parser] Parsing response from {model}...")
+        cleaned = raw.replace("```json", "").replace("```", "").strip()
+
+        try:
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                parsed = [parsed]
+            print(f"🎉 [Parser] Parsed {len(parsed)} service(s) successfully!")
+            return parsed
+
+        except json.JSONDecodeError as e:
+            print(f"💥 [Parser] JSON parse failed from {model}.")
+            print(f"   ↳ Error : {str(e)}")
+            print(f"   ↳ Raw   : {cleaned[:200]}{'...' if len(cleaned) > 200 else ''}")
+            return {"error": "invalid_json", "raw": cleaned, "detail": str(e)}
+
+    # Should never reach here but just in case
+    return {"error": "all_models_failed", "detail": "Exhausted all models in fallback chain."}
 
 
 # ── MISSING FIELD CHECKER ─────────────────────────────────────────────────────
 def flag_missing_fields(service_list: list) -> list:
     """
-    Walk each service dict recursively and report fields that are
+    Recursively walks each service and reports fields that are
     null / empty string / empty list / empty dict.
 
-    Returns a list of dicts:
-      [{"service_index": int, "service_name": str, "missing_fields": [str, ...]}]
+    Returns:
+      [{"service_index": int, "service_name": str, "missing_fields": [str]}]
     """
     def _collect_missing(obj, prefix=""):
         missing = []
@@ -275,8 +284,8 @@ def flag_missing_fields(service_list: list) -> list:
     result = []
     for idx, service in enumerate(service_list):
         result.append({
-            "service_index": idx,
-            "service_name":  service.get("service_name", f"Service {idx + 1}"),
+            "service_index":  idx,
+            "service_name":   service.get("service_name", f"Service {idx + 1}"),
             "missing_fields": _collect_missing(service)
         })
     return result
