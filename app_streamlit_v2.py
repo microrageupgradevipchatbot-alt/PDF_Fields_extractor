@@ -47,7 +47,7 @@ if "processing_done" not in st.session_state:
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
 MAX_FILES       = 5
-TIMEOUT_SECONDS = 180
+TIMEOUT_SECONDS = 280
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
