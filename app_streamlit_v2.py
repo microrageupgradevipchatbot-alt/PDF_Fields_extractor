@@ -260,8 +260,6 @@ if st.session_state.processing_started and st.session_state.staged_files:
         st.info(f"⏳ Processing file {done + 1} of {total}: **{next_file.name}**")
 
         with st.spinner(f"Extracting data from {next_file.name}…"):
-            if done == 0:
-                st.session_state.app_logs = []   # fresh log buffer for each new batch
             result = extract_fields_ai(next_file)
             fname  = safe_name(next_file.name)
             st.session_state.results[fname] = {
@@ -271,15 +269,6 @@ if st.session_state.processing_started and st.session_state.staged_files:
             st.session_state.processed_files.add(fname)
 
         st.rerun()
-
-
-# ─────────────────────────────────────────────
-# Live log panel (shown while/after processing)
-# ─────────────────────────────────────────────
-
-if st.session_state.get("app_logs"):
-    with st.expander("🖥️ Extraction Logs", expanded=True):
-        st.code("\n".join(st.session_state.app_logs), language="bash")
 
 
 # ─────────────────────────────────────────────
