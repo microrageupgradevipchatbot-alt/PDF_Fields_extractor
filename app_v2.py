@@ -28,13 +28,15 @@ print("🔑 [Init] Loaded environment variables and API key.")
 
 # ── MODEL FALLBACK CHAIN ──────────────────────────────────────────────────────
 FALLBACK_MODELS = [
-    "gemini-2.5-flash",                  # 🥇 Primary   — best speed + multimodal PDF
-    "gemini-3.1-flash-image-preview",    # 🥉 Fallback 2 — image-specialized, scanned PDFs
-    "gemini-2.5-pro",                    # 🥈 Fallback 1 — stronger reasoning, complex layouts
-    "gemini-2.0-flash",                  # 4️⃣ Fallback 3 — rock solid, almost never 503s
+    # "models/gemini-2.5-flash",              # Fast, supports PDF/image
+    # "models/gemini-2.5-flash-image",        # Explicit image support
+    "models/gemini-3.1-flash-image-preview",# Newest, image-specialized
+    "models/gemini-3-pro-image-preview",    # Advanced, image-specialized
 ]
 
-print(f"🔗 [Init] Model fallback chain loaded — {len(FALLBACK_MODELS)} models ready.")
+MODEL_TIMEOUT_SECONDS = 30   # PDF extraction needs time — 30s was too short
+
+print(f"🔗 [Init] Model fallback chain: {FALLBACK_MODELS}")
 
 
 # ── CLIENT ────────────────────────────────────────────────────────────────────
@@ -61,19 +63,14 @@ SERVICE_TEMPLATE = {
         "9_pax":  {"adults": None, "children": None},
         "10_pax": {"adults": None, "children": None},
     },
-    "travel_type": "",        # "arrival" | "departure" | "transfer" — never "both"
+    "travel_type": "",
     "meeting_point": "",
     "fast_track": {
-        "departure": {
-            "security": None  # "fast track" | "expedited" | "assistance" | "no assistance" | null
-        },
-        "arrival": {
-            "immigration": None,
-            "customs":     None,
-        }
+        "departure": {"security": None},
+        "arrival":   {"immigration": None, "customs": None}
     },
     "service_details": [],
-    "transportation_inside_airport": "Foot",   # "Foot" | "Vehicle"
+    "transportation_inside_airport": "Foot",
     "assistance_with_pieces_of_luggage": "",
     "lounge_access": "no",
     "farewell": "no",
@@ -90,9 +87,7 @@ SERVICE_TEMPLATE = {
 
 # ── PROMPT ────────────────────────────────────────────────────────────────────
 def _make_prompt() -> str:
-    print("📝 [Prompt] Building extraction prompt.")
     template_json = json.dumps(SERVICE_TEMPLATE, indent=2)
-
     return f"""
 You are extracting airport VIP service information from a single PDF document.
 
@@ -109,18 +104,15 @@ RULE 1 — ARRIVAL / DEPARTURE SPLIT  ⚠️ CRITICAL
 
 - If a service applies to BOTH arrival and departure:
     → Create TWO objects: one travel_type="arrival", one travel_type="departure"
-    → Name them clearly: e.g. "VIP Arrival" and "VIP Departure"
-    → If pricing is shared (e.g. "each way €475"): copy same pricing into both objects
-    → If pricing differs per direction: use correct price for each object
-    → Fill meeting_point, farewell, fast_track, service_details
-      with direction-specific info for each object
+    → If pricing is shared: copy same pricing into both objects
+    → Fill meeting_point, farewell, fast_track, service_details with direction-specific info
 
 - Transfer / Transit services → travel_type = "transfer"
 
 Example — PDF says "Departure or Arrival €475 per person":
 [
-  {{"service_name": "VIP Arrival",    "travel_type": "arrival",    "pricing": {{"1_pax": {{"adults": 475}} }} }},
-  {{"service_name": "VIP Departure",  "travel_type": "departure",  "pricing": {{"1_pax": {{"adults": 475}} }} }}
+  {{"service_name": "VIP Arrival",   "travel_type": "arrival",   "pricing": {{"1_pax": {{"adults": 475}} }} }},
+  {{"service_name": "VIP Departure", "travel_type": "departure", "pricing": {{"1_pax": {{"adults": 475}} }} }}
 ]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -129,20 +121,13 @@ RULE 2 — STRUCTURED fast_track  ⚠️ CRITICAL
 fast_track is a NESTED OBJECT — not a string, not "yes/no".
 
   "fast_track": {{
-    "departure": {{
-      "security": <value>
-    }},
-    "arrival": {{
-      "immigration": <value>,
-      "customs":     <value>
-    }}
+    "departure": {{ "security": <value> }},
+    "arrival":   {{ "immigration": <value>, "customs": <value> }}
   }}
 
-Allowed values:
-  "fast track" | "expedited" | "assistance" | "no assistance" | null
+Allowed values: "fast track" | "expedited" | "assistance" | "no assistance" | null
 
-Direction rules:
-  • ARRIVAL object   → fill arrival.immigration + arrival.customs; departure.security = null
+  • ARRIVAL object   → fill arrival fields; departure.security = null
   • DEPARTURE object → fill departure.security; arrival fields = null
   • TRANSFER object  → fill all three if mentioned
 
@@ -150,8 +135,7 @@ Direction rules:
 RULE 3 — PRICING
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - 1_pax adults  = price for the first / only person
-- 2_pax adults  = cumulative total for 2 people
-  … continue cumulatively per tier
+- 2_pax adults  = cumulative total for 2 people … continue cumulatively
 - children: extract ONLY if explicitly stated; otherwise null
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -168,105 +152,222 @@ RULE 4 — GENERAL
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Return ONLY a valid JSON array. No markdown, no backticks, no explanation text.
+Return ONLY a valid JSON array. No markdown, no backticks, no explanation.
+Ensure the JSON is complete and properly closed — never truncate.
 
 Now extract ALL services from this PDF.
 """
 
 
-# ── EXTRACTION — MODEL FALLBACK CHAIN ────────────────────────────────────────
-def extract_fields_ai(pdf_file) -> list | dict:
-    filename = getattr(pdf_file, "name", "unknown")
-    print(f"\n📄 [Extract] Starting extraction for: {filename}")
+# ── FILE UPLOAD HELPER ────────────────────────────────────────────────────────
+def _upload_pdf(client, pdf_bytes: bytes, filename: str):
+    """Uploads PDF bytes to Gemini Files API. Returns the file object."""
+    print(f"📤 [Upload] Uploading {filename} to Gemini Files API...")
+    pdf_stream = io.BytesIO(pdf_bytes)
+    pdf_stream.name = filename
 
-    pdf_bytes = pdf_file.read()
-    mime_type = getattr(pdf_file, "type", "application/pdf")
-    client    = get_client()
-    prompt    = _make_prompt()
+    uploaded = client.files.upload(
+        file=pdf_stream,
+        config={"mime_type": "application/pdf", "display_name": filename}
+    )
+    print(f"✅ [Upload] File uploaded — URI: {uploaded.uri}")
+    return uploaded
 
-    # Retryable error signals — these trigger fallback to next model
-    RETRYABLE = ("503", "429", "500", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "INTERNAL")
 
-    for idx, model in enumerate(FALLBACK_MODELS):
-        position = f"{idx + 1}/{len(FALLBACK_MODELS)}"
-        print(f"\n🚀 [Gemini] Trying model {position}: {model}")
+def _delete_file(client, uploaded_file):
+    """Best-effort cleanup of uploaded file from Gemini server."""
+    try:
+        client.files.delete(name=uploaded_file.name)
+        print(f"🗑️  [Upload] Cleaned up remote file: {uploaded_file.name}")
+    except Exception as e:
+        print(f"⚠️  [Upload] Could not delete remote file: {e}")
 
+
+# ── STREAMING CALL WITH TIMEOUT ───────────────────────────────────────────────
+def _call_streaming_with_timeout(client, model, uploaded_file, prompt, timeout=MODEL_TIMEOUT_SECONDS):
+    """
+    Streams the Gemini response in a background thread.
+    Returns (full_text, None) on success or (None, error_str) on failure/timeout.
+    """
+    result = {"text": None, "error": None}
+
+    def _stream():
         try:
-            response = client.models.generate_content(
+            chunks = []
+            for chunk in client.models.generate_content_stream(
                 model=model,
                 contents=[
                     types.Content(
                         role="user",
                         parts=[
-                            types.Part.from_bytes(data=pdf_bytes, mime_type=mime_type),
+                            types.Part.from_uri(
+                                file_uri=uploaded_file.uri,
+                                mime_type="application/pdf"
+                            ),
                             types.Part.from_text(text=prompt),
                         ]
                     )
                 ],
                 config=types.GenerateContentConfig(temperature=0)
-            )
-            raw = response.text.strip()
-
-            print(f"✅ [Gemini] Success with model: {model}")
-
+            ):
+                if chunk.text:
+                    chunks.append(chunk.text)
+            result["text"] = "".join(chunks).strip()
         except Exception as e:
-            err_str = str(e)
+            result["error"] = str(e)
 
-            # Check if this error is worth falling back for
-            is_retryable = any(code in err_str for code in RETRYABLE)
+    thread = threading.Thread(target=_stream, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout)
 
-            if not is_retryable:
-                # Hard error (auth, bad request etc.) — no point trying other models
-                print(f"💀 [Gemini] Non-retryable error on {model} — aborting.")
-                print(f"   ↳ {err_str}")
-                return {"error": "model_call_failed", "detail": err_str}
+    if thread.is_alive():
+        return None, f"TIMEOUT after {timeout}s"
 
-            # Soft error — try next model
-            if idx + 1 < len(FALLBACK_MODELS):
-                next_model = FALLBACK_MODELS[idx + 1]
-                delay = round(random.uniform(1, 3), 1)
-                print(f"⚠️  [Gemini] {model} failed — moving to next model.")
-                print(f"   ↳ Reason    : {err_str[:80]}")
-                print(f"   ↳ Next model: {next_model}")
-                print(f"   ↳ Waiting   : {delay}s...")
-                time.sleep(delay)
-            else:
-                print(f"🛑 [Gemini] All {len(FALLBACK_MODELS)} models failed — giving up.")
-                print(f"   ↳ Last error: {err_str}")
-                return {"error": "all_models_failed", "detail": err_str}
+    return result["text"], result["error"]
 
-            continue  # move to next model in loop
 
-        # ── PARSE ─────────────────────────────────────────────────────────────
-        print(f"🔍 [Parser] Parsing response from {model}...")
-        cleaned = raw.replace("```json", "").replace("```", "").strip()
+# ── JSON REPAIR ───────────────────────────────────────────────────────────────
+def _repair_json(raw: str) -> list | None:
+    """Three-strategy recovery for malformed/truncated JSON."""
 
-        try:
-            parsed = json.loads(cleaned)
-            if isinstance(parsed, dict):
-                parsed = [parsed]
-            print(f"🎉 [Parser] Parsed {len(parsed)} service(s) successfully!")
+    # Strategy 1: json_repair library (pip install json-repair)
+    try:
+        from json_repair import repair_json
+        repaired = repair_json(raw, return_objects=True)
+        if isinstance(repaired, list) and repaired:
+            print("🔧 [Repair] json_repair recovered the JSON.")
+            return repaired
+        if isinstance(repaired, dict):
+            return [repaired]
+    except ImportError:
+        pass
+
+    # Strategy 2: close unclosed brackets
+    print("🔧 [Repair] Attempting bracket-close repair...")
+    attempt = raw.rstrip()
+    if attempt.endswith(","):
+        attempt = attempt[:-1]
+    attempt += "}" * max(attempt.count("{") - attempt.count("}"), 0)
+    attempt += "]" * max(attempt.count("[") - attempt.count("]"), 0)
+
+    try:
+        parsed = json.loads(attempt)
+        if isinstance(parsed, list):
+            print(f"🔧 [Repair] Bracket-close succeeded — {len(parsed)} service(s).")
             return parsed
+        if isinstance(parsed, dict):
+            return [parsed]
+    except json.JSONDecodeError:
+        pass
 
-        except json.JSONDecodeError as e:
-            print(f"💥 [Parser] JSON parse failed from {model}.")
-            print(f"   ↳ Error : {str(e)}")
-            print(f"   ↳ Raw   : {cleaned[:200]}{'...' if len(cleaned) > 200 else ''}")
-            return {"error": "invalid_json", "raw": cleaned, "detail": str(e)}
+    # Strategy 3: salvage complete objects
+    print("🔧 [Repair] Attempting object-by-object salvage...")
+    objects, depth, start = [], 0, None
+    for i, ch in enumerate(raw):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    objects.append(json.loads(raw[start:i + 1]))
+                except json.JSONDecodeError:
+                    pass
+                start = None
 
-    # Should never reach here but just in case
-    return {"error": "all_models_failed", "detail": "Exhausted all models in fallback chain."}
+    if objects:
+        print(f"🔧 [Repair] Salvaged {len(objects)} object(s).")
+        return objects
+
+    return None
+
+
+# ── MAIN EXTRACTION ───────────────────────────────────────────────────────────
+def extract_fields_ai(pdf_file) -> list | dict:
+    filename = getattr(pdf_file, "name", "document.pdf")
+    print(f"\n📄 [Extract] Starting extraction for: {filename}")
+
+    pdf_bytes = pdf_file.read()
+    client    = get_client()
+    prompt    = _make_prompt()
+
+    RETRYABLE = ("503", "429", "500", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "INTERNAL", "TIMEOUT")
+
+    # Upload PDF once — shared across all model attempts
+    try:
+        uploaded_file = _upload_pdf(client, pdf_bytes, filename)
+    except Exception as e:
+        print(f"💀 [Upload] Failed to upload PDF: {e}")
+        return {"error": "upload_failed", "detail": str(e)}
+
+    try:
+        for idx, model in enumerate(FALLBACK_MODELS):
+            position = f"{idx + 1}/{len(FALLBACK_MODELS)}"
+            print(f"\n🚀 [Gemini] Trying model {position}: {model}  (timeout={MODEL_TIMEOUT_SECONDS}s)")
+
+            raw, err = _call_streaming_with_timeout(client, model, uploaded_file, prompt)
+
+            # ── Handle errors ──────────────────────────────────────────────
+            if err:
+                is_retryable = any(code in err for code in RETRYABLE)
+
+                if not is_retryable:
+                    print(f"💀 [Gemini] Non-retryable error on {model}.")
+                    print(f"   ↳ {err}")
+                    return {"error": "model_call_failed", "detail": err}
+
+                if idx + 1 < len(FALLBACK_MODELS):
+                    delay = round(random.uniform(1, 3), 1)
+                    print(f"⚠️  [Gemini] {model} failed — moving to next model.")
+                    print(f"   ↳ Reason    : {err[:120]}")
+                    print(f"   ↳ Next model: {FALLBACK_MODELS[idx + 1]}")
+                    print(f"   ↳ Waiting   : {delay}s...")
+                    time.sleep(delay)
+                else:
+                    print(f"🛑 [Gemini] All models failed.")
+                    return {"error": "all_models_failed", "detail": err}
+
+                continue
+
+            print(f"✅ [Gemini] Got response from: {model}")
+
+            # ── Parse ──────────────────────────────────────────────────────
+            print("🔍 [Parser] Parsing response...")
+            cleaned = raw.replace("```json", "").replace("```", "").strip()
+
+            try:
+                parsed = json.loads(cleaned)
+                if isinstance(parsed, dict):
+                    parsed = [parsed]
+                print(f"🎉 [Parser] Clean parse — {len(parsed)} service(s).")
+                return parsed
+            except json.JSONDecodeError as e:
+                print(f"⚠️  [Parser] Clean parse failed: {e} — attempting repair...")
+
+            repaired = _repair_json(cleaned)
+            if repaired:
+                print(f"🎉 [Parser] Repaired — {len(repaired)} service(s).")
+                return repaired
+
+            print(f"💥 [Parser] Repair failed on {model}.")
+            print(f"   ↳ Snippet: {cleaned[:200]}{'...' if len(cleaned) > 200 else ''}")
+
+            if idx + 1 < len(FALLBACK_MODELS):
+                print(f"   ↳ Trying next model: {FALLBACK_MODELS[idx + 1]}")
+                continue
+
+            return {"error": "invalid_json", "raw": cleaned, "detail": "Repair failed on all models."}
+
+    finally:
+        _delete_file(client, uploaded_file)
+
+    return {"error": "all_models_failed", "detail": "Exhausted all models."}
 
 
 # ── MISSING FIELD CHECKER ─────────────────────────────────────────────────────
 def flag_missing_fields(service_list: list) -> list:
-    """
-    Recursively walks each service and reports fields that are
-    null / empty string / empty list / empty dict.
-
-    Returns:
-      [{"service_index": int, "service_name": str, "missing_fields": [str]}]
-    """
     def _collect_missing(obj, prefix=""):
         missing = []
         if isinstance(obj, dict):
@@ -281,11 +382,11 @@ def flag_missing_fields(service_list: list) -> list:
                 missing.extend(_collect_missing(item, f"{prefix}[{i}]"))
         return missing
 
-    result = []
-    for idx, service in enumerate(service_list):
-        result.append({
+    return [
+        {
             "service_index":  idx,
-            "service_name":   service.get("service_name", f"Service {idx + 1}"),
-            "missing_fields": _collect_missing(service)
-        })
-    return result
+            "service_name":   svc.get("service_name", f"Service {idx + 1}"),
+            "missing_fields": _collect_missing(svc)
+        }
+        for idx, svc in enumerate(service_list)
+    ]
