@@ -8,9 +8,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 import os
+import io
 import json
 import time
 import random
+import threading
 # from dotenv import load_dotenv
 from google import genai
 from google.genai import types
