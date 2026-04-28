@@ -17,17 +17,7 @@ api_key = st.secrets["GOOGLE_API"]
 if not api_key:
     raise RuntimeError("Please set GOOGLE_API in your environment (.env).")
 
-
-# ── LOGGER ────────────────────────────────────────────────────────────────────
-def log(msg: str):
-    """Prints to terminal AND appends to Streamlit session log buffer."""
-    print(msg)
-    if "app_logs" not in st.session_state:
-        st.session_state.app_logs = []
-    st.session_state.app_logs.append(msg)
-
-
-log("🔑 [Init] Loaded environment variables and API key.")
+print("🔑 [Init] Loaded environment variables and API key.")
 
 
 # ── MODEL FALLBACK CHAIN ──────────────────────────────────────────────────────
@@ -40,12 +30,12 @@ FALLBACK_MODELS = [
 
 MODEL_TIMEOUT_SECONDS = 30
 
-log(f"🔗 [Init] Model fallback chain: {FALLBACK_MODELS}")
+print(f"🔗 [Init] Model fallback chain: {FALLBACK_MODELS}")
 
 
 # ── CLIENT ────────────────────────────────────────────────────────────────────
 def get_client():
-    log("🤖 [Gemini] Creating Gemini client instance.")
+    print("🤖 [Gemini] Creating Gemini client instance.")
     return genai.Client(api_key=api_key)
 
 
@@ -165,7 +155,7 @@ Now extract ALL services from this PDF.
 
 # ── FILE UPLOAD HELPER ────────────────────────────────────────────────────────
 def _upload_pdf(client, pdf_bytes: bytes, filename: str):
-    log(f"📤 [Upload] Uploading {filename} to Gemini Files API...")
+    print(f"📤 [Upload] Uploading {filename} to Gemini Files API...")
     pdf_stream = io.BytesIO(pdf_bytes)
     pdf_stream.name = filename
 
@@ -173,16 +163,16 @@ def _upload_pdf(client, pdf_bytes: bytes, filename: str):
         file=pdf_stream,
         config={"mime_type": "application/pdf", "display_name": filename}
     )
-    log(f"✅ [Upload] File uploaded — URI: {uploaded.uri}")
+    print(f"✅ [Upload] File uploaded — URI: {uploaded.uri}")
     return uploaded
 
 
 def _delete_file(client, uploaded_file):
     try:
         client.files.delete(name=uploaded_file.name)
-        log(f"🗑️  [Upload] Cleaned up remote file: {uploaded_file.name}")
+        print(f"🗑️  [Upload] Cleaned up remote file: {uploaded_file.name}")
     except Exception as e:
-        log(f"⚠️  [Upload] Could not delete remote file: {e}")
+        print(f"⚠️  [Upload] Could not delete remote file: {e}")
 
 
 # ── STREAMING CALL WITH TIMEOUT ───────────────────────────────────────────────
@@ -231,14 +221,14 @@ def _repair_json(raw: str) -> list | None:
         from json_repair import repair_json
         repaired = repair_json(raw, return_objects=True)
         if isinstance(repaired, list) and repaired:
-            log("🔧 [Repair] json_repair recovered the JSON.")
+            print("🔧 [Repair] json_repair recovered the JSON.")
             return repaired
         if isinstance(repaired, dict):
             return [repaired]
     except ImportError:
         pass
 
-    log("🔧 [Repair] Attempting bracket-close repair...")
+    print("🔧 [Repair] Attempting bracket-close repair...")
     attempt = raw.rstrip()
     if attempt.endswith(","):
         attempt = attempt[:-1]
@@ -248,14 +238,14 @@ def _repair_json(raw: str) -> list | None:
     try:
         parsed = json.loads(attempt)
         if isinstance(parsed, list):
-            log(f"🔧 [Repair] Bracket-close succeeded — {len(parsed)} service(s).")
+            print(f"🔧 [Repair] Bracket-close succeeded — {len(parsed)} service(s).")
             return parsed
         if isinstance(parsed, dict):
             return [parsed]
     except json.JSONDecodeError:
         pass
 
-    log("🔧 [Repair] Attempting object-by-object salvage...")
+    print("🔧 [Repair] Attempting object-by-object salvage...")
     objects, depth, start = [], 0, None
     for i, ch in enumerate(raw):
         if ch == "{":
@@ -272,7 +262,7 @@ def _repair_json(raw: str) -> list | None:
                 start = None
 
     if objects:
-        log(f"🔧 [Repair] Salvaged {len(objects)} object(s).")
+        print(f"🔧 [Repair] Salvaged {len(objects)} object(s).")
         return objects
 
     return None
@@ -281,7 +271,7 @@ def _repair_json(raw: str) -> list | None:
 # ── MAIN EXTRACTION ───────────────────────────────────────────────────────────
 def extract_fields_ai(pdf_file) -> list | dict:
     filename = getattr(pdf_file, "name", "document.pdf")
-    log(f"📄 [Extract] Starting extraction for: {filename}")
+    print(f"\n📄 [Extract] Starting extraction for: {filename}")
 
     pdf_bytes = pdf_file.read()
     client    = get_client()
@@ -292,13 +282,13 @@ def extract_fields_ai(pdf_file) -> list | dict:
     try:
         uploaded_file = _upload_pdf(client, pdf_bytes, filename)
     except Exception as e:
-        log(f"💀 [Upload] Failed to upload PDF: {e}")
+        print(f"💀 [Upload] Failed to upload PDF: {e}")
         return {"error": "upload_failed", "detail": str(e)}
 
     try:
         for idx, model in enumerate(FALLBACK_MODELS):
             position = f"{idx + 1}/{len(FALLBACK_MODELS)}"
-            log(f"🚀 [Gemini] Trying model {position}: {model}  (timeout={MODEL_TIMEOUT_SECONDS}s)")
+            print(f"\n🚀 [Gemini] Trying model {position}: {model}  (timeout={MODEL_TIMEOUT_SECONDS}s)")
 
             raw, err = _call_streaming_with_timeout(client, model, uploaded_file, prompt)
 
@@ -306,47 +296,47 @@ def extract_fields_ai(pdf_file) -> list | dict:
                 is_retryable = any(code in err for code in RETRYABLE)
 
                 if not is_retryable:
-                    log(f"💀 [Gemini] Non-retryable error on {model}.")
-                    log(f"   ↳ {err}")
+                    print(f"💀 [Gemini] Non-retryable error on {model}.")
+                    print(f"   ↳ {err}")
                     return {"error": "model_call_failed", "detail": err}
 
                 if idx + 1 < len(FALLBACK_MODELS):
                     delay = round(random.uniform(1, 3), 1)
-                    log(f"⚠️  [Gemini] {model} failed — moving to next model.")
-                    log(f"   ↳ Reason    : {err[:120]}")
-                    log(f"   ↳ Next model: {FALLBACK_MODELS[idx + 1]}")
-                    log(f"   ↳ Waiting   : {delay}s...")
+                    print(f"⚠️  [Gemini] {model} failed — moving to next model.")
+                    print(f"   ↳ Reason    : {err[:120]}")
+                    print(f"   ↳ Next model: {FALLBACK_MODELS[idx + 1]}")
+                    print(f"   ↳ Waiting   : {delay}s...")
                     time.sleep(delay)
                 else:
-                    log(f"🛑 [Gemini] All models failed.")
+                    print(f"🛑 [Gemini] All models failed.")
                     return {"error": "all_models_failed", "detail": err}
 
                 continue
 
-            log(f"✅ [Gemini] Got response from: {model}")
+            print(f"✅ [Gemini] Got response from: {model}")
 
-            log("🔍 [Parser] Parsing response...")
+            print("🔍 [Parser] Parsing response...")
             cleaned = raw.replace("```json", "").replace("```", "").strip()
 
             try:
                 parsed = json.loads(cleaned)
                 if isinstance(parsed, dict):
                     parsed = [parsed]
-                log(f"🎉 [Parser] Clean parse — {len(parsed)} service(s).")
+                print(f"🎉 [Parser] Clean parse — {len(parsed)} service(s).")
                 return parsed
             except json.JSONDecodeError as e:
-                log(f"⚠️  [Parser] Clean parse failed: {e} — attempting repair...")
+                print(f"⚠️  [Parser] Clean parse failed: {e} — attempting repair...")
 
             repaired = _repair_json(cleaned)
             if repaired:
-                log(f"🎉 [Parser] Repaired — {len(repaired)} service(s).")
+                print(f"🎉 [Parser] Repaired — {len(repaired)} service(s).")
                 return repaired
 
-            log(f"💥 [Parser] Repair failed on {model}.")
-            log(f"   ↳ Snippet: {cleaned[:200]}{'...' if len(cleaned) > 200 else ''}")
+            print(f"💥 [Parser] Repair failed on {model}.")
+            print(f"   ↳ Snippet: {cleaned[:200]}{'...' if len(cleaned) > 200 else ''}")
 
             if idx + 1 < len(FALLBACK_MODELS):
-                log(f"   ↳ Trying next model: {FALLBACK_MODELS[idx + 1]}")
+                print(f"   ↳ Trying next model: {FALLBACK_MODELS[idx + 1]}")
                 continue
 
             return {"error": "invalid_json", "raw": cleaned, "detail": "Repair failed on all models."}
