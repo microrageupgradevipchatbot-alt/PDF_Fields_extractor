@@ -1,11 +1,5 @@
 # app_v2.py — PDF Extractor Backend (v4)
 # ─────────────────────────────────────────────────────────────────────────────
-# CHANGES vs v3:
-#   • Removed per-model retry loop — replaced with model fallback chain
-#   • FALLBACK_MODELS: 2.5-flash → 2.5-pro → 3.1-flash-image-preview → 2.0-flash
-#   • Each model gets ONE clean attempt; failures move to next model
-#   • Retryable errors (503, 429, 500) trigger fallback; others abort immediately
-# ─────────────────────────────────────────────────────────────────────────────
 
 import os
 import io
@@ -13,37 +7,45 @@ import json
 import time
 import random
 import threading
-# from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
 import streamlit as st
+
 # ── ENV ───────────────────────────────────────────────────────────────────────
-# load_dotenv()
-# api_key = os.getenv("GOOGLE_API")
 api_key = st.secrets["GOOGLE_API"]
 if not api_key:
     raise RuntimeError("Please set GOOGLE_API in your environment (.env).")
 
-print("🔑 [Init] Loaded environment variables and API key.")
+
+# ── LOGGER ────────────────────────────────────────────────────────────────────
+def log(msg: str):
+    """Prints to terminal AND appends to Streamlit session log buffer."""
+    print(msg)
+    if "app_logs" not in st.session_state:
+        st.session_state.app_logs = []
+    st.session_state.app_logs.append(msg)
+
+
+log("🔑 [Init] Loaded environment variables and API key.")
 
 
 # ── MODEL FALLBACK CHAIN ──────────────────────────────────────────────────────
 FALLBACK_MODELS = [
-    "models/gemini-2.5-flash",              # Fast, supports PDF/image
-    "models/gemini-2.5-flash-image",        # Explicit image support
-    "models/gemini-3.1-flash-image-preview",# Newest, image-specialized
-    "models/gemini-3-pro-image-preview",    # Advanced, image-specialized
+    "models/gemini-2.5-flash",
+    "models/gemini-2.5-flash-image",
+    "models/gemini-3.1-flash-image-preview",
+    "models/gemini-3-pro-image-preview",
 ]
 
-MODEL_TIMEOUT_SECONDS = 30   # PDF extraction needs time — 30s was too short
+MODEL_TIMEOUT_SECONDS = 30
 
-print(f"🔗 [Init] Model fallback chain: {FALLBACK_MODELS}")
+log(f"🔗 [Init] Model fallback chain: {FALLBACK_MODELS}")
 
 
 # ── CLIENT ────────────────────────────────────────────────────────────────────
 def get_client():
-    print("🤖 [Gemini] Creating Gemini client instance.")
+    log("🤖 [Gemini] Creating Gemini client instance.")
     return genai.Client(api_key=api_key)
 
 
@@ -163,8 +165,7 @@ Now extract ALL services from this PDF.
 
 # ── FILE UPLOAD HELPER ────────────────────────────────────────────────────────
 def _upload_pdf(client, pdf_bytes: bytes, filename: str):
-    """Uploads PDF bytes to Gemini Files API. Returns the file object."""
-    print(f"📤 [Upload] Uploading {filename} to Gemini Files API...")
+    log(f"📤 [Upload] Uploading {filename} to Gemini Files API...")
     pdf_stream = io.BytesIO(pdf_bytes)
     pdf_stream.name = filename
 
@@ -172,25 +173,20 @@ def _upload_pdf(client, pdf_bytes: bytes, filename: str):
         file=pdf_stream,
         config={"mime_type": "application/pdf", "display_name": filename}
     )
-    print(f"✅ [Upload] File uploaded — URI: {uploaded.uri}")
+    log(f"✅ [Upload] File uploaded — URI: {uploaded.uri}")
     return uploaded
 
 
 def _delete_file(client, uploaded_file):
-    """Best-effort cleanup of uploaded file from Gemini server."""
     try:
         client.files.delete(name=uploaded_file.name)
-        print(f"🗑️  [Upload] Cleaned up remote file: {uploaded_file.name}")
+        log(f"🗑️  [Upload] Cleaned up remote file: {uploaded_file.name}")
     except Exception as e:
-        print(f"⚠️  [Upload] Could not delete remote file: {e}")
+        log(f"⚠️  [Upload] Could not delete remote file: {e}")
 
 
 # ── STREAMING CALL WITH TIMEOUT ───────────────────────────────────────────────
 def _call_streaming_with_timeout(client, model, uploaded_file, prompt, timeout=MODEL_TIMEOUT_SECONDS):
-    """
-    Streams the Gemini response in a background thread.
-    Returns (full_text, None) on success or (None, error_str) on failure/timeout.
-    """
     result = {"text": None, "error": None}
 
     def _stream():
@@ -230,22 +226,19 @@ def _call_streaming_with_timeout(client, model, uploaded_file, prompt, timeout=M
 
 # ── JSON REPAIR ───────────────────────────────────────────────────────────────
 def _repair_json(raw: str) -> list | None:
-    """Three-strategy recovery for malformed/truncated JSON."""
 
-    # Strategy 1: json_repair library (pip install json-repair)
     try:
         from json_repair import repair_json
         repaired = repair_json(raw, return_objects=True)
         if isinstance(repaired, list) and repaired:
-            print("🔧 [Repair] json_repair recovered the JSON.")
+            log("🔧 [Repair] json_repair recovered the JSON.")
             return repaired
         if isinstance(repaired, dict):
             return [repaired]
     except ImportError:
         pass
 
-    # Strategy 2: close unclosed brackets
-    print("🔧 [Repair] Attempting bracket-close repair...")
+    log("🔧 [Repair] Attempting bracket-close repair...")
     attempt = raw.rstrip()
     if attempt.endswith(","):
         attempt = attempt[:-1]
@@ -255,15 +248,14 @@ def _repair_json(raw: str) -> list | None:
     try:
         parsed = json.loads(attempt)
         if isinstance(parsed, list):
-            print(f"🔧 [Repair] Bracket-close succeeded — {len(parsed)} service(s).")
+            log(f"🔧 [Repair] Bracket-close succeeded — {len(parsed)} service(s).")
             return parsed
         if isinstance(parsed, dict):
             return [parsed]
     except json.JSONDecodeError:
         pass
 
-    # Strategy 3: salvage complete objects
-    print("🔧 [Repair] Attempting object-by-object salvage...")
+    log("🔧 [Repair] Attempting object-by-object salvage...")
     objects, depth, start = [], 0, None
     for i, ch in enumerate(raw):
         if ch == "{":
@@ -280,7 +272,7 @@ def _repair_json(raw: str) -> list | None:
                 start = None
 
     if objects:
-        print(f"🔧 [Repair] Salvaged {len(objects)} object(s).")
+        log(f"🔧 [Repair] Salvaged {len(objects)} object(s).")
         return objects
 
     return None
@@ -289,7 +281,7 @@ def _repair_json(raw: str) -> list | None:
 # ── MAIN EXTRACTION ───────────────────────────────────────────────────────────
 def extract_fields_ai(pdf_file) -> list | dict:
     filename = getattr(pdf_file, "name", "document.pdf")
-    print(f"\n📄 [Extract] Starting extraction for: {filename}")
+    log(f"📄 [Extract] Starting extraction for: {filename}")
 
     pdf_bytes = pdf_file.read()
     client    = get_client()
@@ -297,67 +289,64 @@ def extract_fields_ai(pdf_file) -> list | dict:
 
     RETRYABLE = ("503", "429", "500", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "INTERNAL", "TIMEOUT")
 
-    # Upload PDF once — shared across all model attempts
     try:
         uploaded_file = _upload_pdf(client, pdf_bytes, filename)
     except Exception as e:
-        print(f"💀 [Upload] Failed to upload PDF: {e}")
+        log(f"💀 [Upload] Failed to upload PDF: {e}")
         return {"error": "upload_failed", "detail": str(e)}
 
     try:
         for idx, model in enumerate(FALLBACK_MODELS):
             position = f"{idx + 1}/{len(FALLBACK_MODELS)}"
-            print(f"\n🚀 [Gemini] Trying model {position}: {model}  (timeout={MODEL_TIMEOUT_SECONDS}s)")
+            log(f"🚀 [Gemini] Trying model {position}: {model}  (timeout={MODEL_TIMEOUT_SECONDS}s)")
 
             raw, err = _call_streaming_with_timeout(client, model, uploaded_file, prompt)
 
-            # ── Handle errors ──────────────────────────────────────────────
             if err:
                 is_retryable = any(code in err for code in RETRYABLE)
 
                 if not is_retryable:
-                    print(f"💀 [Gemini] Non-retryable error on {model}.")
-                    print(f"   ↳ {err}")
+                    log(f"💀 [Gemini] Non-retryable error on {model}.")
+                    log(f"   ↳ {err}")
                     return {"error": "model_call_failed", "detail": err}
 
                 if idx + 1 < len(FALLBACK_MODELS):
                     delay = round(random.uniform(1, 3), 1)
-                    print(f"⚠️  [Gemini] {model} failed — moving to next model.")
-                    print(f"   ↳ Reason    : {err[:120]}")
-                    print(f"   ↳ Next model: {FALLBACK_MODELS[idx + 1]}")
-                    print(f"   ↳ Waiting   : {delay}s...")
+                    log(f"⚠️  [Gemini] {model} failed — moving to next model.")
+                    log(f"   ↳ Reason    : {err[:120]}")
+                    log(f"   ↳ Next model: {FALLBACK_MODELS[idx + 1]}")
+                    log(f"   ↳ Waiting   : {delay}s...")
                     time.sleep(delay)
                 else:
-                    print(f"🛑 [Gemini] All models failed.")
+                    log(f"🛑 [Gemini] All models failed.")
                     return {"error": "all_models_failed", "detail": err}
 
                 continue
 
-            print(f"✅ [Gemini] Got response from: {model}")
+            log(f"✅ [Gemini] Got response from: {model}")
 
-            # ── Parse ──────────────────────────────────────────────────────
-            print("🔍 [Parser] Parsing response...")
+            log("🔍 [Parser] Parsing response...")
             cleaned = raw.replace("```json", "").replace("```", "").strip()
 
             try:
                 parsed = json.loads(cleaned)
                 if isinstance(parsed, dict):
                     parsed = [parsed]
-                print(f"🎉 [Parser] Clean parse — {len(parsed)} service(s).")
+                log(f"🎉 [Parser] Clean parse — {len(parsed)} service(s).")
                 return parsed
             except json.JSONDecodeError as e:
-                print(f"⚠️  [Parser] Clean parse failed: {e} — attempting repair...")
+                log(f"⚠️  [Parser] Clean parse failed: {e} — attempting repair...")
 
             repaired = _repair_json(cleaned)
             if repaired:
-                print(f"🎉 [Parser] Repaired — {len(repaired)} service(s).")
+                log(f"🎉 [Parser] Repaired — {len(repaired)} service(s).")
                 return repaired
 
-            print(f"💥 [Parser] Repair failed on {model}.")
-            print(f"   ↳ Snippet: {cleaned[:200]}{'...' if len(cleaned) > 200 else ''}")
+            log(f"💥 [Parser] Repair failed on {model}.")
+            log(f"   ↳ Snippet: {cleaned[:200]}{'...' if len(cleaned) > 200 else ''}")
 
             if idx + 1 < len(FALLBACK_MODELS):
-                print(f"   ↳ Trying next model: {FALLBACK_MODELS[idx + 1]}")
+                log(f"   ↳ Trying next model: {FALLBACK_MODELS[idx + 1]}")
                 continue
 
             return {"error": "invalid_json", "raw": cleaned, "detail": "Repair failed on all models."}
