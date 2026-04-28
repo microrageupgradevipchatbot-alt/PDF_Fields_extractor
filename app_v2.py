@@ -30,8 +30,8 @@ print("🔑 [Init] Loaded environment variables and API key.")
 
 # ── MODEL FALLBACK CHAIN ──────────────────────────────────────────────────────
 FALLBACK_MODELS = [
-    # "models/gemini-2.5-flash",              # Fast, supports PDF/image
-    # "models/gemini-2.5-flash-image",        # Explicit image support
+    "models/gemini-2.5-flash",              # Fast, supports PDF/image
+    "models/gemini-2.5-flash-image",        # Explicit image support
     "models/gemini-3.1-flash-image-preview",# Newest, image-specialized
     "models/gemini-3-pro-image-preview",    # Advanced, image-specialized
 ]
