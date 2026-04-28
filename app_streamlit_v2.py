@@ -1,304 +1,343 @@
-# app_streamlit_v2.py — Streamlit Frontend (v5)
-# ─────────────────────────────────────────────────────────────────────────────
-# NEW in v5 — Custom file basket UI:
-#   - User adds files one by one (or several at once) via a small uploader
-#   - Files accumulate in a "basket" stored in session_state
-#   - Each queued file shows a remove ✕ button so user can drop unwanted ones
-#   - Hard cap of 5 files total
-#   - "Process All Files" button only appears once user has added at least 1 file
-#   - Processing + results happen only after that button is clicked
-#   - Already-processed files are cached so re-clicking doesn't reprocess them
-# ─────────────────────────────────────────────────────────────────────────────
-
 import json
-import time
-import io
-from concurrent.futures import ThreadPoolExecutor
-
 import streamlit as st
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
+from app_v2 import extract_fields_ai
 
-from app_v2 import extract_fields_ai, flag_missing_fields
+st.set_page_config(page_title="PDF Extractor + Verification", layout="centered")
 
+st.title("📄 PDF Extractor with Verification")
 
-# ── PAGE CONFIG ───────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Service PDF Extractor", layout="centered")
-st.markdown("# 📄 Service PDF Extractor — Gemini Vision")
-st.markdown("Add PDFs one by one (up to 5), then click **Process All Files**.")
-st.markdown("---")
+# ─────────────────────────────────────────────
+# Session Init
+# ─────────────────────────────────────────────
 
+if "results" not in st.session_state:
+    st.session_state.results = {}
 
-# ── SESSION STATE INIT ────────────────────────────────────────────────────────
-# basket        : list of UploadedFile objects the user has queued
-# basket_keys   : set of "name_size" strings to detect duplicates
-# results       : dict of  cache_key → extracted result
-# processing_done: bool — True after Process button was clicked and all ran
+if "processed_files" not in st.session_state:
+    st.session_state.processed_files = set()
 
-if "basket"         not in st.session_state:
-    st.session_state.basket          = []
-if "basket_keys"    not in st.session_state:
-    st.session_state.basket_keys     = set()
-if "results"        not in st.session_state:
-    st.session_state.results         = {}
-if "processing_done" not in st.session_state:
-    st.session_state.processing_done = False
+if "staged_files" not in st.session_state:
+    st.session_state.staged_files = []   # list of uploaded file objects
+
+if "processing_started" not in st.session_state:
+    st.session_state.processing_started = False
 
 
-# ── CONSTANTS ─────────────────────────────────────────────────────────────────
-MAX_FILES       = 5
-TIMEOUT_SECONDS = 280
+# ─────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────
+
+def normalize_result(result):
+    if isinstance(result, dict):
+        return [result]
+    return result
 
 
-# ── HELPERS ───────────────────────────────────────────────────────────────────
-def file_cache_key(f) -> str:
-    """Unique key per file = name + size."""
-    return f"result_{f.name}_{f.size}"
+def keyify(path):
+    return path.replace(".", "_").replace("[", "_").replace("]", "")
 
-def basket_id(f) -> str:
-    """Short ID used to detect duplicate additions."""
-    return f"{f.name}_{f.size}"
 
-def create_pdf_from_text(text: str) -> io.BytesIO:
-    """Render a plain-text string into a downloadable PDF buffer."""
-    buffer   = io.BytesIO()
-    pdf      = canvas.Canvas(buffer, pagesize=letter)
-    text_obj = pdf.beginText(40, 750)
-    text_obj.setFont("Helvetica", 11)
-    for line in text.split("\n"):
-        if text_obj.getY() < 40:
-            pdf.drawText(text_obj)
-            pdf.showPage()
-            text_obj = pdf.beginText(40, 750)
-            text_obj.setFont("Helvetica", 11)
-        text_obj.textLine(line)
-    pdf.drawText(text_obj)
-    pdf.showPage()
-    pdf.save()
-    buffer.seek(0)
-    return buffer
+def pretty_label(path):
+    label = path.split(".")[-1]
+    return label.replace("_", " ").title()
 
-def _render_result(filename: str, result):
-    """Display extracted JSON, missing-fields report, and download buttons."""
 
-    # Error
-    if isinstance(result, dict) and result.get("error"):
-        st.error(f"Extraction failed for **{filename}**")
-        st.write(result.get("detail") or result.get("raw") or result)
-        return
+def safe_name(name):
+    return name.replace(".", "_").replace(" ", "_")
 
-    if not result:
-        st.warning(f"No services extracted from **{filename}**.")
-        return
 
-    # Success
-    num = len(result) if isinstance(result, list) else 1
-    st.success(f"{num} service(s) extracted")
+# ─────────────────────────────────────────────
+# UI Components
+# ─────────────────────────────────────────────
 
-    st.subheader("Extracted JSON")
-    st.json(result)
+def render_leaf(path, value):
+    key_base = keyify(path)
+    label = pretty_label(path)
 
-    # Missing fields
-    if isinstance(result, list):
-        missing = flag_missing_fields(result)
-        st.subheader("Missing or Incomplete Fields")
-        for svc in missing:
-            if svc["missing_fields"]:
-                st.write(f"**{svc['service_name']}**: " + ", ".join(svc["missing_fields"]))
-            else:
-                st.write(f"**{svc['service_name']}**: ✅ All fields filled")
+    col1, col2, col3 = st.columns([2, 4, 1])
 
-    # Downloads
-    st.markdown("---")
-    json_str  = json.dumps(result, indent=2)
-    safe_name = filename.replace(".pdf", "")
-    col1, col2 = st.columns(2)
     with col1:
-        st.download_button(
-            "📥 Download as TXT", data=json_str,
-            file_name=f"{safe_name}_extracted.txt",
-            mime="text/plain", key=f"dl_txt_{filename}"
-        )
+        st.markdown(f"**{label}**")
+
     with col2:
-        st.download_button(
-            "📄 Download as PDF", data=create_pdf_from_text(json_str),
-            file_name=f"{safe_name}_extracted.pdf",
-            mime="application/pdf", key=f"dl_pdf_{filename}"
+        st.text_input(
+            label,
+            value if value is not None else "",
+            label_visibility="collapsed",
+            key=f"value_{key_base}"
         )
 
+    with col3:
+        st.checkbox("Verified", key=f"verify_{key_base}", label_visibility="hidden")
 
-# ── SECTION 1: FILE ADDER ─────────────────────────────────────────────────────
-# Small uploader — user can click it multiple times to add different files.
-# Each new upload is appended to the basket (not replacing the previous ones).
 
-slots_left = MAX_FILES - len(st.session_state.basket)
+def render_pricing(path, pricing_dict):
+    st.markdown("### 💰 Pricing")
 
-if slots_left > 0:
-    st.subheader("➕ Add Files")
+    for pax, data in pricing_dict.items():
+        col1, col2, col3, col4 = st.columns([2, 3, 3, 1])
+
+        with col1:
+            st.markdown(f"**{pax.replace('_',' ').title()}**")
+
+        with col2:
+            st.text_input(
+                "Adults",
+                data.get("adults") or "",
+                label_visibility="collapsed",
+                key=f"value_{path}_{pax}_adults"
+            )
+
+        with col3:
+            st.text_input(
+                "Children",
+                data.get("children") or "",
+                label_visibility="collapsed",
+                key=f"value_{path}_{pax}_children"
+            )
+
+        with col4:
+            st.checkbox("Verified", key=f"verify_{path}_{pax}", label_visibility="hidden")
+
+
+# ─────────────────────────────────────────────
+# Recursive Renderer
+# ─────────────────────────────────────────────
+
+def render_field(path, value):
+
+    if path.endswith("pricing") and isinstance(value, dict):
+        render_pricing(path, value)
+        return
+
+    if isinstance(value, dict):
+        st.markdown(f"### {pretty_label(path)}")
+        for k, v in value.items():
+            render_field(f"{path}.{k}", v)
+
+    elif isinstance(value, list):
+        for i, item in enumerate(value):
+            render_field(f"{path}[{i}]", item)
+
+    else:
+        render_leaf(path, value)
+
+
+# ─────────────────────────────────────────────
+# Verification
+# ─────────────────────────────────────────────
+
+def is_file_verified(file_key):
+    keys = [k for k in st.session_state if k.startswith(f"verify_{file_key}")]
+    return keys and all(st.session_state[k] for k in keys)
+
+
+# ─────────────────────────────────────────────
+# Rebuild JSON
+# ─────────────────────────────────────────────
+
+def rebuild_json(original, path):
+
+    if isinstance(original, dict):
+        new_obj = {}
+
+        for k, v in original.items():
+
+            if k == "pricing" and isinstance(v, dict):
+                pricing_new = {}
+
+                for pax, data in v.items():
+                    pricing_new[pax] = {
+                        "adults": st.session_state.get(
+                            f"value_{path}.{k}_{pax}_adults",
+                            data.get("adults")
+                        ),
+                        "children": st.session_state.get(
+                            f"value_{path}.{k}_{pax}_children",
+                            data.get("children")
+                        ),
+                    }
+
+                new_obj[k] = pricing_new
+
+            else:
+                new_obj[k] = rebuild_json(v, f"{path}.{k}")
+
+        return new_obj
+
+    elif isinstance(original, list):
+        return [
+            rebuild_json(item, f"{path}[{i}]")
+            for i, item in enumerate(original)
+        ]
+
+    else:
+        key_base = keyify(path)
+        return st.session_state.get(f"value_{key_base}", original)
+
+
+# ─────────────────────────────────────────────
+# STAGE 1 — File picker with queue management
+# ─────────────────────────────────────────────
+
+if not st.session_state.processing_started:
+
+    # File uploader (does NOT auto-process)
     new_files = st.file_uploader(
-        f"Select PDF(s) — {slots_left} slot(s) remaining",
+        "Select PDFs to upload (up to 5)",
         type=["pdf"],
         accept_multiple_files=True,
-        # key changes whenever basket changes so uploader resets after each add
-        key=f"uploader_{len(st.session_state.basket)}",
-        label_visibility="visible"
+        key="file_picker"
     )
 
+    # Merge newly picked files into the staged queue (avoid duplicates by name)
     if new_files:
-        added = 0
+        existing_names = {f.name for f in st.session_state.staged_files}
         for f in new_files:
-            bid = basket_id(f)
-            if len(st.session_state.basket) >= MAX_FILES:
-                st.warning(f"Maximum {MAX_FILES} files reached. '{f.name}' was not added.")
-                break
-            if bid in st.session_state.basket_keys:
-                st.info(f"'{f.name}' is already in the queue — skipped.")
-                continue
-            st.session_state.basket.append(f)
-            st.session_state.basket_keys.add(bid)
-            added += 1
+            if f.name not in existing_names:
+                if len(st.session_state.staged_files) >= 5:
+                    st.warning("Maximum 5 files allowed. Some files were not added.")
+                    break
+                st.session_state.staged_files.append(f)
+                existing_names.add(f.name)
 
-        if added:
-            # Reset processing_done so user can re-process after adding new files
-            st.session_state.processing_done = False
-            st.rerun()   # rerun so uploader resets and basket list refreshes
-else:
-    st.info(f"Queue is full ({MAX_FILES}/{MAX_FILES} files). Remove a file to add another.")
+    # Show the staged queue with remove buttons
+    if st.session_state.staged_files:
+        st.markdown("### 📋 Files queued for processing")
 
+        to_remove = None
+        for idx, f in enumerate(st.session_state.staged_files):
+            col_name, col_size, col_btn = st.columns([5, 2, 1])
+            with col_name:
+                st.markdown(f"📄 **{f.name}**")
+            with col_size:
+                size_kb = len(f.getvalue()) / 1024
+                st.caption(f"{size_kb:.1f} KB")
+                f.seek(0)          # reset pointer after getvalue()
+            with col_btn:
+                if st.button("✕", key=f"remove_{idx}", help=f"Remove {f.name}"):
+                    to_remove = idx
 
-# ── SECTION 2: QUEUED FILES LIST ──────────────────────────────────────────────
-# Shows every file in the basket with a ✕ remove button next to each.
+        if to_remove is not None:
+            st.session_state.staged_files.pop(to_remove)
+            st.rerun()
 
-if st.session_state.basket:
-    st.subheader(f"📋 Queued Files ({len(st.session_state.basket)}/{MAX_FILES})")
+        st.markdown("---")
 
-    for i, f in enumerate(list(st.session_state.basket)):
-        col_name, col_size, col_btn = st.columns([5, 1.5, 1])
-
-        with col_name:
-            # Show a tick if already processed, clock if pending
-            already_done = file_cache_key(f) in st.session_state.results
-            icon = "✅" if already_done else "🕐"
-            st.write(f"{icon}  **{f.name}**")
-
-        with col_size:
-            size_kb = round(f.size / 1024, 1)
-            st.write(f"{size_kb} KB")
-
-        with col_btn:
-            # Each remove button has a unique key based on position + name
-            if st.button("✕", key=f"remove_{i}_{f.name}", help=f"Remove {f.name}"):
-                st.session_state.basket.pop(i)
-                st.session_state.basket_keys.discard(basket_id(f))
-                # If this file had a result, clear it too
-                st.session_state.results.pop(file_cache_key(f), None)
-                st.session_state.processing_done = False
+        col_proceed, col_clear = st.columns([3, 1])
+        with col_proceed:
+            if st.button(
+                f"▶ Proceed — extract {len(st.session_state.staged_files)} file(s)",
+                type="primary",
+                use_container_width=True
+            ):
+                st.session_state.processing_started = True
                 st.rerun()
+        with col_clear:
+            if st.button("🗑 Clear all", use_container_width=True):
+                st.session_state.staged_files = []
+                st.rerun()
+
+    else:
+        st.info("Select one or more PDF files above, then click **Proceed** to start extraction.")
+
+
+# ─────────────────────────────────────────────
+# STAGE 2 — Sequential processing (one file per rerun)
+# ─────────────────────────────────────────────
+
+if st.session_state.processing_started and st.session_state.staged_files:
+
+    pending = [
+        f for f in st.session_state.staged_files
+        if safe_name(f.name) not in st.session_state.processed_files
+    ]
+
+    if pending:
+        total = len(st.session_state.staged_files)
+        done  = total - len(pending)
+        next_file = pending[0]
+        st.info(f"⏳ Processing file {done + 1} of {total}: **{next_file.name}**")
+
+        with st.spinner(f"Extracting data from {next_file.name}…"):
+            result = extract_fields_ai(next_file)
+            fname  = safe_name(next_file.name)
+            st.session_state.results[fname] = {
+                "original_name": next_file.name,
+                "data": result
+            }
+            st.session_state.processed_files.add(fname)
+
+        st.rerun()
+
+
+# ─────────────────────────────────────────────
+# STAGE 3 — Display results
+# ─────────────────────────────────────────────
+
+for fname, payload in st.session_state.results.items():
+
+    file_display = payload["original_name"]
+    result       = payload["data"]
+
+    st.markdown(f"# 📁 {file_display}")
+
+    if isinstance(result, dict) and result.get("error"):
+        st.error("Extraction failed")
+        st.write(result)
+        continue
+
+    services = normalize_result(result)
+
+    # ── Raw extraction download (always available) ──────────────────────────
+    raw_json_str = json.dumps(services, indent=2)
+    st.download_button(
+        label="📥 Download raw extracted JSON",
+        data=raw_json_str,
+        file_name=f"{fname}_raw.json",
+        mime="application/json",
+        key=f"download_raw_{fname}"
+    )
+
+    # ── Per-service editable fields ─────────────────────────────────────────
+    for i, svc in enumerate(services):
+        idx = i + 1
+        with st.expander(f"Service {idx}", expanded=False):
+            render_field(f"{fname}_service_{idx}", svc)
 
     st.markdown("---")
 
-
-# ── SECTION 3: PROCESS BUTTON ─────────────────────────────────────────────────
-# Only shown when there are files in the basket.
-# Clicking it sets a flag and reruns — processing happens in Section 4.
-
-if st.session_state.basket:
-
-    # Check how many files still need processing
-    unprocessed = [
-        f for f in st.session_state.basket
-        if file_cache_key(f) not in st.session_state.results
-    ]
-
-    if unprocessed:
-        btn_label = (
-            f"🚀  Process All Files ({len(st.session_state.basket)} total)"
-            if not st.session_state.processing_done
-            else f"🔄  Process New Files ({len(unprocessed)} remaining)"
-        )
-        if st.button(btn_label, type="primary", use_container_width=True):
-            st.session_state.processing_done = True
-            st.rerun()
+    # ── Verified download ───────────────────────────────────────────────────
+    if not is_file_verified(fname):
+        st.warning(f"⚠️ Please verify all fields for {file_display}")
     else:
-        st.success("All files have been processed!")
+        st.success(f"✅ {file_display} verified!")
+
+        final_json = [
+            rebuild_json(svc, f"{fname}_service_{i+1}")
+            for i, svc in enumerate(services)
+        ]
+
+        st.json(final_json)
+
+        st.download_button(
+            f"📥 Download verified JSON — {file_display}",
+            data=json.dumps(final_json, indent=2),
+            file_name=f"{fname}_verified.json",
+            mime="application/json",
+            key=f"download_verified_{fname}"
+        )
+
+    st.markdown("-----")
 
 
-# ── SECTION 4: PROCESSING + RESULTS ──────────────────────────────────────────
-# Runs only after the Process button has been clicked (processing_done = True).
-# Each file is processed one at a time with a live progress bar.
-# Result appears immediately in its own expander as soon as that file finishes.
+# ─────────────────────────────────────────────
+# Reset button (once processing is done or started)
+# ─────────────────────────────────────────────
 
-if st.session_state.processing_done and st.session_state.basket:
-
-    st.subheader("📊 Results")
-
-    dot_frames = ["·", "··", "···", "····"]
-
-    for pdf_file in st.session_state.basket:
-        cache_key = file_cache_key(pdf_file)
-
-        with st.expander(f"📁  {pdf_file.name}", expanded=True):
-
-            # ── Already processed — just render ──────────────────────────────
-            if cache_key in st.session_state.results:
-                _render_result(pdf_file.name, st.session_state.results[cache_key])
-
-            # ── Needs processing — run with live progress ─────────────────────
-            else:
-                status_box   = st.empty()
-                progress_box = st.empty()
-                hint_box     = st.empty()
-                start_time   = time.time()
-                estimated_max = 90
-
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(extract_fields_ai, pdf_file)
-                    tick   = 0
-
-                    while not future.done():
-                        elapsed = time.time() - start_time
-                        dots    = dot_frames[tick % len(dot_frames)]
-                        tick   += 1
-
-                        # Hard timeout
-                        if elapsed > TIMEOUT_SECONDS:
-                            future.cancel()
-                            status_box.error(
-                                f"Timeout: **{pdf_file.name}** took over "
-                                f"{TIMEOUT_SECONDS}s. Try uploading again."
-                            )
-                            progress_box.empty()
-                            hint_box.empty()
-                            result = {
-                                "error":  "timeout",
-                                "detail": f"No response within {TIMEOUT_SECONDS}s."
-                            }
-                            break
-
-                        pct = min(int((elapsed / estimated_max) * 100), 95)
-                        status_box.info(f"Processing **{pdf_file.name}** {dots}")
-                        progress_box.progress(pct, text=f"{pct}%  |  {int(elapsed)}s elapsed")
-
-                        if elapsed < 10:
-                            hint_box.caption(f"Step 1/3: Reading PDF content {dots}")
-                        elif elapsed < 35:
-                            hint_box.caption(f"Step 2/3: Extracting services and pricing {dots}")
-                        else:
-                            hint_box.caption(f"Step 3/3: Validating and preparing output {dots}")
-
-                        time.sleep(0.4)
-                    else:
-                        # Loop ended normally (future.done() became True)
-                        try:
-                            result = future.result()
-                        except Exception as e:
-                            result = {"error": "exception", "detail": str(e)}
-
-                total = time.time() - start_time
-                status_box.success(f"Done: **{pdf_file.name}** in {total:.1f}s")
-                progress_box.progress(100, text="100% — Complete")
-                hint_box.empty()
-
-                # Cache and render
-                st.session_state.results[cache_key] = result
-                _render_result(pdf_file.name, result)
+if st.session_state.processing_started:
+    st.markdown("---")
+    if st.button("🔄 Start over with new files"):
+        for key in ["results", "processed_files", "staged_files", "processing_started"]:
+            del st.session_state[key]
+        st.rerun()
